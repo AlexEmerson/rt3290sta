@@ -2,10 +2,10 @@
 
     Module Name:
 	rt_linux.h
- 
+
     Abstract:
 	Any OS related definition/MACRO is defined here.
- 
+
     Revision History:
     Who        When          What
     ---------  ----------    ----------------------------------------------
@@ -267,12 +267,17 @@ struct iw_statistics *rt28xx_get_wireless_stats(
  ***********************************************************************************/
 typedef struct file* RTMP_OS_FD;
 
-typedef struct _OS_FS_INFO_
-{
-	int				fsuid;
-	int				fsgid;
-	mm_segment_t	fs;
-} OS_FS_INFO;
+ typedef struct _OS_FS_INFO_
+ {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,13,0)
+ 	int				fsuid;
+ 	int				fsgid;
+#else
+	kuid_t				fsuid;
+	kgid_t				fsgid;
+#endif
+ 	mm_segment_t	fs;
+ } OS_FS_INFO;
 
 #define IS_FILE_OPEN_ERR(_fd) 	((_fd == NULL) || IS_ERR((_fd)))
 
@@ -352,8 +357,8 @@ typedef spinlock_t			OS_NDIS_SPIN_LOCK;
 	Following lock/unlock definition used for BBP/RF register read/write.
 	Currently we don't use it to protect MAC register access.
 
-	For USB: 
-			we use binary semaphore to do the protection because all register 
+	For USB:
+			we use binary semaphore to do the protection because all register
 			access done in kernel thread and should allow task go sleep when
 			in protected status.
 
@@ -361,7 +366,7 @@ typedef spinlock_t			OS_NDIS_SPIN_LOCK;
 			We use interrupt to do the protection because the register may accessed
 			in thread/tasklet/timer/inteerupt, so we use interrupt_disable to protect
 			the access.
-*/	
+*/
 #define RTMP_MCU_RW_LOCK(_pAd, _irqflags)	\
 	do{								\
 		if (_pAd->infType == RTMP_DEV_INF_USB)	\
@@ -386,7 +391,7 @@ typedef spinlock_t			OS_NDIS_SPIN_LOCK;
 		}\
 	}while(0)
 
-	
+
 #ifndef wait_event_interruptible_timeout
 #define __wait_event_interruptible_timeout(wq, condition, ret) \
 do { \
@@ -514,8 +519,19 @@ typedef struct tasklet_struct  *POS_NET_TASK_STRUCT;
  **********************************************************************************/
 #define OS_HZ			HZ
 
-typedef struct timer_list	OS_NDIS_MINIPORT_TIMER;
-typedef struct timer_list	OS_TIMER;
+struct legacy_timer_emu {
+	struct timer_list t;
+	void (*function)(unsigned long);
+	unsigned long data;
+};
+
+#if defined (LINUX_VERSION_CODE) && (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0))
+	typedef struct legacy_timer_emu	OS_NDIS_MINIPORT_TIMER;
+	typedef struct legacy_timer_emu	OS_TIMER;
+#else
+	typedef struct timer_list	OS_NDIS_MINIPORT_TIMER;
+	typedef struct timer_list	OS_TIMER;
+#endif
 
 typedef void (*TIMER_FUNCTION)(unsigned long);
 
@@ -593,7 +609,7 @@ struct os_cookie {
 	struct work_struct   ac2_dma_done_work;
 	struct work_struct   ac3_dma_done_work;
 	struct work_struct   hcca_dma_done_work;
-	
+
 	struct work_struct   tbtt_work;
 
 #else
@@ -706,7 +722,7 @@ void linux_pci_unmap_single(void *handle, ra_dma_addr_t dma_addr, size_t size, i
 
 #define PCI_MAP_SINGLE_DEV(_handle, _ptr, _size, _sd_idx, _dir)				\
 	linux_pci_map_single(_handle, _ptr, _size, _sd_idx, _dir)
-	
+
 #define PCI_UNMAP_SINGLE(_pAd, _ptr, _size, _dir)						\
 	linux_pci_unmap_single(((POS_COOKIE)(_pAd->OS_Cookie))->pci_dev, _ptr, _size, _dir)
 
@@ -985,23 +1001,23 @@ void linux_pci_unmap_single(void *handle, ra_dma_addr_t dma_addr, size_t size, i
 		(RTPKT_TO_OSPKT(_pkt)->len)
 #define SET_OS_PKT_LEN(_pkt, _len)	\
 		(RTPKT_TO_OSPKT(_pkt)->len) = (_len)
-		
+
 #define GET_OS_PKT_DATATAIL(_pkt) \
-		(RTPKT_TO_OSPKT(_pkt)->tail)
+		((unsigned char*)skb_tail_pointer(RTPKT_TO_OSPKT(_pkt)))
 #define SET_OS_PKT_DATATAIL(_pkt, _start, _len)	\
-		((RTPKT_TO_OSPKT(_pkt))->tail) = (PUCHAR)((_start) + (_len))
-		
+		(skb_set_tail_pointer((RTPKT_TO_OSPKT(_pkt)), (_len)))
+
 #define GET_OS_PKT_HEAD(_pkt) \
 		(RTPKT_TO_OSPKT(_pkt)->head)
 
 #define GET_OS_PKT_END(_pkt) \
-		(RTPKT_TO_OSPKT(_pkt)->end)
+		((unsigned char*)skb_end_pointer(RTPKT_TO_OSPKT(_pkt)))
 
 #define GET_OS_PKT_NETDEV(_pkt) \
 		(RTPKT_TO_OSPKT(_pkt)->dev)
 #define SET_OS_PKT_NETDEV(_pkt, _pNetDev)	\
 		(RTPKT_TO_OSPKT(_pkt)->dev) = (_pNetDev)
-		
+
 #define GET_OS_PKT_TYPE(_pkt) \
 		(RTPKT_TO_OSPKT(_pkt))
 
@@ -1186,7 +1202,7 @@ void linux_pci_unmap_single(void *handle, ra_dma_addr_t dma_addr, size_t size, i
 				else																		\
 					(RTPKT_TO_OSPKT(_p)->cb[CB_OFF+11]) &= (~RTMP_PACKET_SPECIFIC_LLCSNAP);		\
 			}while(0)
-			
+
 #define RTMP_GET_PACKET_LLCSNAP(_p)		(RTPKT_TO_OSPKT(_p)->cb[CB_OFF+11] & RTMP_PACKET_SPECIFIC_LLCSNAP)
 
 /* IP */
@@ -1197,7 +1213,7 @@ void linux_pci_unmap_single(void *handle, ra_dma_addr_t dma_addr, size_t size, i
 				else																		\
 					(RTPKT_TO_OSPKT(_p)->cb[CB_OFF+11]) &= (~RTMP_PACKET_SPECIFIC_IPV4);	\
 			}while(0)
-			
+
 #define RTMP_GET_PACKET_IPV4(_p)		(RTPKT_TO_OSPKT(_p)->cb[CB_OFF+11] & RTMP_PACKET_SPECIFIC_IPV4)
 
 // TDLS
@@ -1208,7 +1224,7 @@ void linux_pci_unmap_single(void *handle, ra_dma_addr_t dma_addr, size_t size, i
 				else																		\
 					(RTPKT_TO_OSPKT(_p)->cb[CB_OFF+11]) &= (~RTMP_PACKET_SPECIFIC_TDLS);	\
 			}while(0)
-			
+
 #define RTMP_GET_PACKET_TDLS(_p)		(RTPKT_TO_OSPKT(_p)->cb[CB_OFF+11] & RTMP_PACKET_SPECIFIC_TDLS)
 
 /* If this flag is set, it indicates that this EAPoL frame MUST be clear. */
@@ -1246,7 +1262,7 @@ void linux_pci_unmap_single(void *handle, ra_dma_addr_t dma_addr, size_t size, i
 #ifdef INF_AMAZON_SE
 /* [CB_OFF+28], 1B, Iverson patch for WMM A5-T07 ,WirelessStaToWirelessSta do not bulk out aggregate */
 #define RTMP_SET_PACKET_NOBULKOUT(_p, _morebit)			(RTPKT_TO_OSPKT(_p)->cb[CB_OFF+28] = _morebit)
-#define RTMP_GET_PACKET_NOBULKOUT(_p)					(RTPKT_TO_OSPKT(_p)->cb[CB_OFF+28])			
+#define RTMP_GET_PACKET_NOBULKOUT(_p)					(RTPKT_TO_OSPKT(_p)->cb[CB_OFF+28])
 #endif /* INF_AMAZON_SE */
 
 
@@ -1287,7 +1303,7 @@ rt2860_interrupt(int irq, void *dev_instance, struct pt_regs *regs);
 
 INT rt28xx_ioctl(
 	IN	PNET_DEV		net_dev,
-	IN	OUT	struct ifreq	*rq, 
+	IN	OUT	struct ifreq	*rq,
 	IN	INT			cmd);
 
 extern int ra_mtd_write(int num, loff_t to, size_t len, const u_char *buf);
@@ -1341,7 +1357,7 @@ typedef struct usb_device_id USB_DEVICE_ID;
 #endif
 #else
 #define RTUSB_URB_ALLOC_BUFFER(_dev, _size, _dma)	kmalloc(_size, GFP_ATOMIC)
-#define RTUSB_URB_FREE_BUFFER(_dev, _size, _addr, _dma)	kfree(_addr) 
+#define RTUSB_URB_FREE_BUFFER(_dev, _size, _addr, _dma)	kfree(_addr)
 #endif
 
 #else
@@ -1396,7 +1412,7 @@ typedef struct usb_device_id USB_DEVICE_ID;
 #define RtmpUsbBulkOutPsPollComplete			RTUSBBulkOutPsPollComplete
 #define RtmpUsbBulkRxComplete					RTUSBBulkRxComplete
 
-#if ((LINUX_VERSION_CODE < KERNEL_VERSION(2, 5, 51)) || (LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 18))) 
+#if ((LINUX_VERSION_CODE < KERNEL_VERSION(2, 5, 51)) || (LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 18)))
 #define RTUSBBulkOutDataPacketComplete(Status, pURB, pt_regs)    RTUSBBulkOutDataPacketComplete(pURB)
 #define RTUSBBulkOutMLMEPacketComplete(Status, pURB, pt_regs)    RTUSBBulkOutMLMEPacketComplete(pURB)
 #define RTUSBBulkOutNullFrameComplete(Status, pURB, pt_regs)     RTUSBBulkOutNullFrameComplete(pURB)
@@ -1493,7 +1509,7 @@ USBHST_STATUS RTUSBBulkRxComplete(URBCompleteStatus Status, purbb_t pURB, pregs 
 					FILL_BULK_URB(pUrb, pUsb_Dev, usb_sndbulkpipe(pUsb_Dev, uEndpointAddress),	\
 								pTransferBuf, BufSize, Complete, pContext);	\
 				}while(0)
-#endif	
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,5,0)
 #define RTUSB_FILL_RX_BULK_URB(pUrb,	\
@@ -1525,7 +1541,7 @@ USBHST_STATUS RTUSBBulkRxComplete(URBCompleteStatus Status, purbb_t pURB, pregs 
 								pTransferBuf, BufSize, Complete, pContext);	\
 				}while(0)
 #endif
-	
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,5,0)
 #define RTUSB_URB_DMA_MAPPING(pUrb)	\
 	{	\
@@ -1548,7 +1564,7 @@ USBHST_STATUS RTUSBBulkRxComplete(URBCompleteStatus Status, purbb_t pURB, pregs 
 				ret = -1;	\
 			}	\
 		}while(0)
-		
+
 #define rtusb_urb_context  context
 #define rtusb_urb_status   status
 

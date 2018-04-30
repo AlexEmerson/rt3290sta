@@ -104,14 +104,28 @@ VOID RtmpUtilInit(
 	}
 }
 
+
+static void legacy_timer_emu_func(struct timer_list *t)
+{
+	struct legacy_timer_emu *lt = from_timer(lt, t, t);
+	lt->function(lt->data);
+}
+
+
+
 /* timeout -- ms */
 static inline VOID __RTMP_SetPeriodicTimer(
 	IN OS_NDIS_MINIPORT_TIMER * pTimer,
 	IN unsigned long timeout)
 {
 	timeout = ((timeout * OS_HZ) / 1000);
-	pTimer->expires = jiffies + timeout;
-	add_timer(pTimer);
+	#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0))
+		pTimer->t.expires = jiffies + timeout;
+		add_timer(&pTimer->t);
+	#else
+		pTimer->expires = jiffies + timeout;
+		add_timer(pTimer);
+	#endif
 }
 
 /* convert NdisMInitializeTimer --> RTMP_OS_Init_Timer */
@@ -121,8 +135,16 @@ static inline VOID __RTMP_OS_Init_Timer(
 	IN TIMER_FUNCTION function,
 	IN PVOID data)
 {
-	if (!timer_pending(pTimer)) {
+	#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0))
+	if (!timer_pending(&pTimer->t)){
+		timer_setup(&pTimer->t, legacy_timer_emu_func, 0);
+	#else
+
+	if (!timer_pending(pTimer)){
 		init_timer(pTimer);
+	#endif
+
+
 		pTimer->data = (unsigned long)data;
 		pTimer->function = function;
 	}
@@ -130,14 +152,21 @@ static inline VOID __RTMP_OS_Init_Timer(
 
 static inline VOID __RTMP_OS_Add_Timer(
 	IN OS_NDIS_MINIPORT_TIMER * pTimer,
-	IN unsigned long timeout)
-{
-	if (timer_pending(pTimer))
-		return;
+	IN unsigned long timeout){
+	#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0))
+		if (timer_pending(&pTimer->t))
+			return;
+		timeout = ((timeout * OS_HZ) / 1000);
+		pTimer->t.expires = jiffies + timeout;
+		add_timer(&pTimer->t);
 
-	timeout = ((timeout * OS_HZ) / 1000);
-	pTimer->expires = jiffies + timeout;
-	add_timer(pTimer);
+	#else
+		if (timer_pending(pTimer))
+			return;
+		timeout = ((timeout * OS_HZ) / 1000);
+		pTimer->expires = jiffies + timeout;
+		add_timer(pTimer);
+	#endif
 }
 
 static inline VOID __RTMP_OS_Mod_Timer(
@@ -145,15 +174,26 @@ static inline VOID __RTMP_OS_Mod_Timer(
 	IN unsigned long timeout)
 {
 	timeout = ((timeout * OS_HZ) / 1000);
-	mod_timer(pTimer, jiffies + timeout);
+
+	#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0))
+		mod_timer(&pTimer->t, jiffies + timeout);
+	#else
+ 		mod_timer(pTimer, jiffies + timeout);
+  #endif
 }
 
 static inline VOID __RTMP_OS_Del_Timer(
 	IN OS_NDIS_MINIPORT_TIMER * pTimer,
 	OUT BOOLEAN *pCancelled)
 {
+	#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0))
+	if (timer_pending(&pTimer->t))
+		*pCancelled = del_timer_sync(&pTimer->t);
+	#else
 	if (timer_pending(pTimer))
-		*pCancelled = del_timer_sync(pTimer);
+ 		*pCancelled = del_timer_sync(pTimer);
+  #endif
+
 	else
 		*pCancelled = TRUE;
 }
@@ -505,9 +545,9 @@ PNDIS_PACKET duplicate_pkt(
 		MEM_DBG_PKT_ALLOC_INC(skb);
 
 		skb_reserve(skb, 2);
-		NdisMoveMemory(skb->tail, pHeader802_3, HdrLen);
+		NdisMoveMemory((unsigned char*)skb_tail_pointer(skb), pHeader802_3, HdrLen);
 		skb_put(skb, HdrLen);
-		NdisMoveMemory(skb->tail, pData, DataSize);
+		NdisMoveMemory((unsigned char*)skb_tail_pointer(skb), pData, DataSize);
 		skb_put(skb, DataSize);
 		skb->dev = pNetDev;	/*get_netdev_from_bssid(pAd, FromWhichBSSID); */
 		pPacket = OSPKT_TO_RTPKT(skb);
@@ -659,7 +699,7 @@ PNDIS_PACKET ClonePacket(
 		pClonedPkt->dev = pRxPkt->dev;
 		pClonedPkt->data = pData;
 		pClonedPkt->len = DataSize;
-		pClonedPkt->tail = pClonedPkt->data + pClonedPkt->len;
+		skb_set_tail_pointer(pClonedPkt, DataSize);
 		ASSERT(DataSize < 1530);
 	}
 	return pClonedPkt;
@@ -705,7 +745,7 @@ void wlan_802_11_to_802_3_packet(
 	pOSPkt->dev = pNetDev;
 	pOSPkt->data = pData;
 	pOSPkt->len = DataSize;
-	pOSPkt->tail = pOSPkt->data + pOSPkt->len;
+	skb_set_tail_pointer(pOSPkt, DataSize);
 
 	/* */
 	/* copy 802.3 header */
@@ -1133,8 +1173,8 @@ static inline void __RtmpOSFSInfoChange(OS_FS_INFO * pOSFSInfo,
 		pOSFSInfo->fsgid = current->fsgid;
 		current->fsuid = current->fsgid = 0;
 #else
-		pOSFSInfo->fsuid.val = current_fsuid().val;
-		pOSFSInfo->fsgid.val = current_fsgid().val;
+		pOSFSInfo->fsuid = current_fsuid();
+		pOSFSInfo->fsgid = current_fsgid();
 #endif
 		pOSFSInfo->fs = get_fs();
 		set_fs(KERNEL_DS);
@@ -1394,7 +1434,7 @@ int RtmpOSWrielessEventSend(IN PNET_DEV pNetDev,
 			    IN INT flags,
 			    IN PUCHAR pSrcMac,
 			    IN PUCHAR pData,
-			    IN UINT32 dataLen) 
+			    IN UINT32 dataLen)
 {
 	union iwreq_data wrqu;
 
@@ -1631,9 +1671,9 @@ PNET_DEV RtmpOSNetDevGetByName(PNET_DEV pNetDev,
 void RtmpOSNetDeviceRefPut(PNET_DEV pNetDev)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,5,0)
-	/* 
-	   every time dev_get_by_name is called, and it has returned a valid struct 
-	   net_device*, dev_put should be called afterwards, because otherwise the 
+	/*
+	   every time dev_get_by_name is called, and it has returned a valid struct
+	   net_device*, dev_put should be called afterwards, because otherwise the
 	   machine hangs when the device is unregistered (since dev->refcnt > 1).
 	 */
 	if (pNetDev)
@@ -1715,7 +1755,7 @@ int RtmpOSNetDevAttach(
 		pNetDev->ethtool_ops = &RALINK_Ethtool_Ops;
 #endif
 
-		/* if you don't implement get_stats, just leave the callback function as NULL, a dummy 
+		/* if you don't implement get_stats, just leave the callback function as NULL, a dummy
 		   function will make kernel panic.
 		 */
 		if (pDevOpHook->get_stats)
@@ -1971,7 +2011,7 @@ VOID RtmpDrvAllE2PPrint(IN VOID *pReserved,
 	{
 		orig_fs = get_fs();
 		set_fs(KERNEL_DS);
-		
+
 		/* open file */
 		file_w = filp_open(fileName, O_WRONLY | O_CREAT, 0);
 		if (IS_ERR(file_w)) {
@@ -2490,7 +2530,7 @@ VOID CFG80211OS_UnRegister(
 			Must unregister, or you will suffer problem when you change
 			regulatory domain by using iw.
 		*/
-		
+
 #ifdef RFKILL_HW_SUPPORT
 		wiphy_rfkill_stop_polling(pCfg80211_CB->pCfg80211_Wdev->wiphy);
 #endif /* RFKILL_HW_SUPPORT */
@@ -3603,13 +3643,17 @@ VOID RTMP_OS_Add_Timer(IN NDIS_MINIPORT_TIMER *pTimerOrg,
 	 pTimer = (OS_NDIS_MINIPORT_TIMER *) (pTimerOrg->pContent);
 
 	if (pTimer != NULL) {
-		if (timer_pending(pTimer))
+		#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0))
+			if (timer_pending(&pTimer->t))
+		#else
+			if (timer_pending(pTimer))
+		#endif
 			return;
 
 		__RTMP_OS_Add_Timer(pTimer,
 				    timeout);
 	}
-} 
+}
 
 VOID RTMP_OS_Mod_Timer(IN NDIS_MINIPORT_TIMER *pTimerOrg,
 			 IN unsigned long timeout) {
@@ -4924,7 +4968,7 @@ Note:
 */
 VOID RtmpOsPktTailAdjust(IN PNDIS_PACKET pNetPkt,
 			 IN UINT removedTagLen) {
-	OS_PKT_TAIL_ADJUST(pNetPkt, removedTagLen);
+	skb_set_tail_pointer(pNetPkt, pNetPkt->len - removedTagLen)
 }
 
 /*
@@ -4990,7 +5034,7 @@ PUCHAR RtmpOsPktHeadBufExtend(IN PNDIS_PACKET pNetPkt,
 /*
 ========================================================================
 Routine Description:
-	
+
 
 Arguments:
 	pPkt			- the packet
